@@ -5,20 +5,31 @@ mod oprw_impl;
 mod paa_impl;
 mod pbo_impl;
 
-use crate::oprw_impl::{create_wrp_from_buf, create_wrp_from_vec};
+use crate::{
+    bridge::{EddsCxx, EddsMipmapCxx, PaaCxx, PixelTypeCxx},
+    oprw_impl::{create_wrp_from_buf, create_wrp_from_vec},
+};
 use std::{
     fs::File,
     io::{BufReader, Cursor},
 };
 
-use arma_file_formats::real_virtuality::{
-    p3d::ODOL,
-    paa::Paa,
-    pbo::PboReader,
-    rap::{Cfg, CfgClass, CfgEntry, EntryReturn},
+use arma_file_formats::{
+    core::types::PixelType,
+    enfusion::{self, edds::Edds},
+    real_virtuality::{
+        p3d::ODOL,
+        paa::Paa,
+        pbo::PboReader,
+        rap::{Cfg, CfgClass, CfgEntry, EntryReturn},
+    },
 };
-use bridge::{EntryCxx, LodCxx, MipmapCxx, ODOLCxx, PboCxx, ResolutionEnumCxx};
+use bridge::{EntryCxx, LodCxx, ODOLCxx, PaaMipmapCxx, PboCxx, ResolutionEnumCxx};
 use cxx::{CxxString, CxxVector};
+use gio::{
+    glib::{self, translate::FromGlibPtrBorrow},
+    prelude::{FileExt, InputStreamExtManual},
+};
 
 pub struct OdolLazyReaderCxx {
     reader: Cursor<Vec<u8>>,
@@ -114,11 +125,11 @@ pub fn create_pbo_reader_path(path: &CxxString) -> anyhow::Result<Box<PboReaderC
     Ok(Box::new(PboReaderCxx { reader }))
 }
 
-pub fn get_mipmap_from_paa_vec(buf: &Vec<u8>, index: u32) -> anyhow::Result<MipmapCxx> {
+pub fn get_mipmap_from_paa_vec(buf: &Vec<u8>, index: u32) -> anyhow::Result<PaaMipmapCxx> {
     get_mipmap_from_paa_internal(buf.as_slice(), index)
 }
 
-fn get_mipmap_from_paa_internal(buf: &[u8], index: u32) -> anyhow::Result<MipmapCxx> {
+fn get_mipmap_from_paa_internal(buf: &[u8], index: u32) -> anyhow::Result<PaaMipmapCxx> {
     let mut cursor = Cursor::new(buf);
     let paa = Paa::from_reader(&mut cursor, Some(&[index; 1]))?;
 
@@ -132,7 +143,7 @@ fn get_mipmap_from_paa_internal(buf: &[u8], index: u32) -> anyhow::Result<Mipmap
     }
 }
 
-pub fn get_mipmap_from_paa(buf: &CxxVector<u8>, index: u32) -> anyhow::Result<MipmapCxx> {
+pub fn get_mipmap_from_paa(buf: &CxxVector<u8>, index: u32) -> anyhow::Result<PaaMipmapCxx> {
     get_mipmap_from_paa_internal(buf.as_slice(), index)
 }
 
@@ -319,10 +330,88 @@ fn check_for_magic_and_decompress_lzss_file(
     )
 }
 
+unsafe fn gfile_pointer_to_gfile(
+    gfile: *mut crate::bridge::GFileWrapperCxx,
+) -> glib::translate::Borrowed<gio::File> {
+    let ptr: *mut gio::ffi::GFile = gfile as *mut gio::ffi::GFile;
+
+    unsafe { FromGlibPtrBorrow::from_glib_borrow(ptr) }
+}
+
+impl From<PixelType> for PixelTypeCxx {
+    fn from(value: PixelType) -> Self {
+        match value {
+            PixelType::Unknown => PixelTypeCxx::Unknown,
+            PixelType::Rgb => PixelTypeCxx::Rgb,
+            PixelType::Rgba => PixelTypeCxx::Rgba,
+            PixelType::Gray => PixelTypeCxx::Gray,
+            PixelType::GrayAlpha => PixelTypeCxx::GrayAlpha,
+        }
+    }
+}
+
+impl From<Paa> for PaaCxx {
+    fn from(value: Paa) -> Self {
+        Self {
+            pixel_type: value.pixel_type.into(),
+            mipmaps: value.mipmaps.iter().map(|mm| mm.clone().into()).collect(),
+        }
+    }
+}
+
+impl From<Edds> for EddsCxx {
+    fn from(value: Edds) -> Self {
+        Self {
+            pixel_type: value.pixel_type.into(),
+            mipmaps: value.mipmaps.iter().map(|mm| mm.clone().into()).collect(),
+        }
+    }
+}
+
+impl From<enfusion::edds::Mipmap> for EddsMipmapCxx {
+    fn from(value: enfusion::edds::Mipmap) -> Self {
+        Self {
+            width: value.width as u16,
+            height: value.height as u16,
+            data: value.data,
+        }
+    }
+}
+
+unsafe fn load_paa_from_gfile(
+    gfile: *mut crate::bridge::GFileWrapperCxx,
+    index: u32,
+) -> anyhow::Result<PaaCxx> {
+    let file = unsafe { gfile_pointer_to_gfile(gfile) };
+
+    let mut input_stream = file.read(Option::<&gio::Cancellable>::None)?.into_read();
+
+    let paa = Paa::from_reader(&mut input_stream, Some(&[index]))?;
+    Ok(paa.into())
+}
+
+unsafe fn load_edds_from_gfile(
+    gfile: *mut crate::bridge::GFileWrapperCxx,
+    #[allow(unused_variables)] index: u32, // ToDo
+) -> anyhow::Result<EddsCxx> {
+    let file = unsafe { gfile_pointer_to_gfile(gfile) };
+
+    let mut input_stream = file.read(Option::<&gio::Cancellable>::None)?.into_read();
+
+    let edds = Edds::from(&mut input_stream)?;
+    Ok(edds.into())
+}
+
 #[cxx::bridge(namespace = "arma_file_formats::cxx")]
 mod bridge {
 
+    extern "C++" {
+        include!("reader.h");
+        type GFileWrapperCxx;
+    }
+
     extern "Rust" {
+
         // RAP
         type CfgCxx;
 
@@ -384,8 +473,13 @@ mod bridge {
         ) -> Result<bool>;
         pub fn get_prefix(self: &PboReaderCxx) -> String;
 
-        fn get_mipmap_from_paa(buf: &CxxVector<u8>, index: u32) -> Result<MipmapCxx>;
-        fn get_mipmap_from_paa_vec(buf: &Vec<u8>, index: u32) -> Result<MipmapCxx>;
+        // PAA
+        fn get_mipmap_from_paa(buf: &CxxVector<u8>, index: u32) -> Result<PaaMipmapCxx>;
+        fn get_mipmap_from_paa_vec(buf: &Vec<u8>, index: u32) -> Result<PaaMipmapCxx>;
+        unsafe fn load_paa_from_gfile(gfile: *mut GFileWrapperCxx, index: u32) -> Result<PaaCxx>;
+
+        // EDDS
+        unsafe fn load_edds_from_gfile(gfile: *mut GFileWrapperCxx, index: u32) -> Result<EddsCxx>;
 
         // Util
         fn check_for_magic_and_decompress_lzss_file(
@@ -395,7 +489,35 @@ mod bridge {
     }
 
     #[derive(Debug)]
-    pub struct MipmapCxx {
+    pub enum PixelTypeCxx {
+        Unknown,
+        Rgb,
+        Rgba,
+        Gray,
+        GrayAlpha,
+    }
+
+    #[derive(Debug)]
+    pub struct EddsCxx {
+        pixel_type: PixelTypeCxx,
+        mipmaps: Vec<EddsMipmapCxx>,
+    }
+
+    #[derive(Debug)]
+    pub struct EddsMipmapCxx {
+        pub width: u16,
+        pub height: u16,
+        pub data: Vec<u8>,
+    }
+
+    #[derive(Debug)]
+    pub struct PaaCxx {
+        pixel_type: PixelTypeCxx,
+        mipmaps: Vec<PaaMipmapCxx>,
+    }
+
+    #[derive(Debug)]
+    pub struct PaaMipmapCxx {
         pub width: u16,
         pub height: u16,
         pub data: Vec<u8>,
@@ -864,6 +986,7 @@ mod bridge {
         pub rtw_b: AnimationRTWeightCxx,
     }
 
+    #[allow(dead_code)]
     #[derive(Debug)]
     pub struct ClipFlagsCxx {
         pub value: i32,
@@ -1077,6 +1200,7 @@ mod bridge {
         PSUninitialized = 4294967295,
     }
 
+    #[allow(dead_code)]
     #[derive(Debug)]
     pub struct VertextShaderIDCxx {
         pub v: i32,

@@ -1,11 +1,13 @@
 #pragma once
 
-#include <iostream>
-
 #include <rust/cxx.h>
 
-namespace ArmaPlace::ArmaFileFormats
+#include <iostream>
+
+namespace arma_file_formats::cxx
 {
+    struct GFileWrapperCxx;
+
     class Seeker
     {
     public:
