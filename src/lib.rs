@@ -27,8 +27,9 @@ use arma_file_formats::{
 use bridge::{EntryCxx, LodCxx, ODOLCxx, PaaMipmapCxx, PboCxx, ResolutionEnumCxx};
 use cxx::{CxxString, CxxVector};
 use gio::{
+    FileCreateFlags,
     glib::{self, translate::FromGlibPtrBorrow},
-    prelude::{FileExt, InputStreamExtManual},
+    prelude::{FileExt, InputStreamExtManual, OutputStreamExtManual},
 };
 
 pub struct OdolLazyReaderCxx {
@@ -378,6 +379,30 @@ impl From<enfusion::edds::Mipmap> for EddsMipmapCxx {
     }
 }
 
+unsafe fn write_paa_to_gfile(
+    gfile: *mut crate::bridge::GFileWrapperCxx,
+    data: &CxxVector<u8>,
+    width: u16,
+    height: u16,
+) -> anyhow::Result<()> {
+    let data_vec: Vec<u8> = data.iter().map(|f| *f).collect();
+    let mut paa = Paa::from_image(width, height, data_vec);
+
+    let file = unsafe { gfile_pointer_to_gfile(gfile) };
+    let mut stream = file
+        .replace(
+            None,
+            false,
+            FileCreateFlags::NONE,
+            Option::<&gio::Cancellable>::None,
+        )?
+        .into_write();
+
+    paa.write(&mut stream, None)?;
+
+    Ok(())
+}
+
 unsafe fn load_paa_from_gfile(
     gfile: *mut crate::bridge::GFileWrapperCxx,
     index: u32,
@@ -477,6 +502,13 @@ mod bridge {
         fn get_mipmap_from_paa(buf: &CxxVector<u8>, index: u32) -> Result<PaaMipmapCxx>;
         fn get_mipmap_from_paa_vec(buf: &Vec<u8>, index: u32) -> Result<PaaMipmapCxx>;
         unsafe fn load_paa_from_gfile(gfile: *mut GFileWrapperCxx, index: u32) -> Result<PaaCxx>;
+
+        unsafe fn write_paa_to_gfile(
+            gfile: *mut GFileWrapperCxx,
+            data: &CxxVector<u8>,
+            width: u16,
+            height: u16,
+        ) -> Result<()>;
 
         // EDDS
         unsafe fn load_edds_from_gfile(gfile: *mut GFileWrapperCxx, index: u32) -> Result<EddsCxx>;
