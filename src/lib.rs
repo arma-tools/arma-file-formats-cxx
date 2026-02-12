@@ -119,16 +119,32 @@ pub fn get_mipmap_from_paa_vec(buf: &Vec<u8>, index: u32) -> anyhow::Result<Mipm
 }
 
 fn get_mipmap_from_paa_internal(buf: &[u8], index: u32) -> anyhow::Result<MipmapCxx> {
-    let mut cursor = Cursor::new(buf);
-    let paa = Paa::from_reader(&mut cursor, Some(&[index; 1]))?;
+    let result = std::panic::catch_unwind(|| {
+        let mut cursor = Cursor::new(buf);
+        let paa = Paa::from_reader(&mut cursor, Some(&[index; 1]))?;
 
-    if let Some(mm) = paa.mipmaps.get(index as usize) {
-        Ok(mm.clone().into())
-    } else {
-        Err(anyhow::anyhow!(format!(
-            "PAA: Mipmap at index {} not found",
-            index
-        )))
+        if let Some(mm) = paa.mipmaps.get(index as usize) {
+            Ok(mm.clone().into())
+        } else {
+            Err(anyhow::anyhow!(format!(
+                "PAA: Mipmap at index {} not found",
+                index
+            )))
+        }
+    });
+
+    match result {
+        Ok(inner) => inner,
+        Err(panic_info) => {
+            let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            Err(anyhow::anyhow!("PAA decode panicked: {}", msg))
+        }
     }
 }
 
